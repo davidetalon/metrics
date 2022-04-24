@@ -18,7 +18,7 @@ import pytest
 import torch
 
 from tests.helpers.testers import MetricTester
-from torchmetrics.detection.map import MeanAveragePrecision
+from torchmetrics.detection.mean_ap import MeanAveragePrecision
 from torchmetrics.utilities.imports import _TORCHVISION_AVAILABLE, _TORCHVISION_GREATER_EQUAL_0_8
 
 Input = namedtuple("Input", ["preds", "target"])
@@ -99,6 +99,40 @@ _inputs = Input(
     ],
 )
 
+# example from this issue https://github.com/PyTorchLightning/metrics/issues/943
+_inputs2 = Input(
+    preds=[
+        [
+            dict(
+                boxes=torch.Tensor([[258.0, 41.0, 606.0, 285.0]]),
+                scores=torch.Tensor([0.536]),
+                labels=torch.IntTensor([0]),
+            ),
+        ],
+        [
+            dict(
+                boxes=torch.Tensor([[258.0, 41.0, 606.0, 285.0]]),
+                scores=torch.Tensor([0.536]),
+                labels=torch.IntTensor([0]),
+            )
+        ],
+    ],
+    target=[
+        [
+            dict(
+                boxes=torch.Tensor([[214.0, 41.0, 562.0, 285.0]]),
+                labels=torch.IntTensor([0]),
+            )
+        ],
+        [
+            dict(
+                boxes=torch.Tensor([]),
+                labels=torch.IntTensor([]),
+            )
+        ],
+    ],
+)
+
 
 def _compare_fn(preds, target) -> dict:
     """Comparison function for map implementation.
@@ -164,6 +198,7 @@ _pytest_condition = not (_TORCHVISION_AVAILABLE and _TORCHVISION_GREATER_EQUAL_0
 
 
 @pytest.mark.skipif(_pytest_condition, reason="test requires that torchvision=>0.8.0 is installed")
+@pytest.mark.parametrize("compute_on_cpu", [True, False])
 class TestMAP(MetricTester):
     """Test the MAP metric for object detection predictions.
 
@@ -175,7 +210,7 @@ class TestMAP(MetricTester):
     atol = 1e-1
 
     @pytest.mark.parametrize("ddp", [False, True])
-    def test_map(self, ddp):
+    def test_map(self, compute_on_cpu, ddp):
         """Test modular implementation for correctness."""
         self.run_class_metric_test(
             ddp=ddp,
@@ -185,7 +220,7 @@ class TestMAP(MetricTester):
             sk_metric=_compare_fn,
             dist_sync_on_step=False,
             check_batch=False,
-            metric_args={"class_metrics": True},
+            metric_args={"class_metrics": True, "compute_on_cpu": compute_on_cpu},
         )
 
 
@@ -248,14 +283,13 @@ def _move_to_gpu(input):
 
 @pytest.mark.skipif(_pytest_condition, reason="test requires that torchvision=>0.8.0 is installed")
 @pytest.mark.skipif(_gpu_test_condition, reason="test requires CUDA availability")
-def test_map_gpu():
+@pytest.mark.parametrize("inputs", [_inputs, _inputs2])
+def test_map_gpu(inputs):
     """Test predictions on single gpu."""
     metric = MeanAveragePrecision()
     metric = metric.to("cuda")
-    preds = _inputs.preds[0]
-    targets = _inputs.target[0]
-
-    metric.update(_move_to_gpu(preds), _move_to_gpu(targets))
+    for preds, targets in zip(inputs.preds, inputs.target):
+        metric.update(_move_to_gpu(preds), _move_to_gpu(targets))
     metric.compute()
 
 
@@ -264,6 +298,50 @@ def test_empty_metric():
     """Test empty metric."""
     metric = MeanAveragePrecision()
     metric.compute()
+
+
+@pytest.mark.skipif(_pytest_condition, reason="test requires that pycocotools and torchvision=>0.8.0 is installed")
+def test_missing_pred():
+    """One good detection, one false negative.
+
+    Map should be lower than 1. Actually it is 0.5, but the exact value depends on where we are sampling (i.e. recall's
+    values)
+    """
+    gts = [
+        dict(boxes=torch.Tensor([[10, 20, 15, 25]]), labels=torch.IntTensor([0])),
+        dict(boxes=torch.Tensor([[10, 20, 15, 25]]), labels=torch.IntTensor([0])),
+    ]
+    preds = [
+        dict(boxes=torch.Tensor([[10, 20, 15, 25]]), scores=torch.Tensor([0.9]), labels=torch.IntTensor([0])),
+        # Empty prediction
+        dict(boxes=torch.Tensor([]), scores=torch.Tensor([]), labels=torch.IntTensor([])),
+    ]
+    metric = MeanAveragePrecision()
+    metric.update(preds, gts)
+    result = metric.compute()
+    assert result["map"] < 1, "MAP cannot be 1, as there is a missing prediction."
+
+
+@pytest.mark.skipif(_pytest_condition, reason="test requires that pycocotools and torchvision=>0.8.0 is installed")
+def test_missing_gt():
+    """The symmetric case of test_missing_pred.
+
+    One good detection, one false positive. Map should be lower than 1. Actually it is 0.5, but the exact value depends
+    on where we are sampling (i.e. recall's values)
+    """
+    gts = [
+        dict(boxes=torch.Tensor([[10, 20, 15, 25]]), labels=torch.IntTensor([0])),
+        dict(boxes=torch.Tensor([]), labels=torch.IntTensor([])),
+    ]
+    preds = [
+        dict(boxes=torch.Tensor([[10, 20, 15, 25]]), scores=torch.Tensor([0.9]), labels=torch.IntTensor([0])),
+        dict(boxes=torch.Tensor([[10, 20, 15, 25]]), scores=torch.Tensor([0.95]), labels=torch.IntTensor([0])),
+    ]
+
+    metric = MeanAveragePrecision()
+    metric.update(preds, gts)
+    result = metric.compute()
+    assert result["map"] < 1, "MAP cannot be 1, as there is an image with no ground truth, but some predictions."
 
 
 @pytest.mark.skipif(_pytest_condition, reason="test requires that torchvision=>0.8.0 is installed")
