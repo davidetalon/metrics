@@ -7,9 +7,10 @@ from torchmetrics import Metric
 from torchmetrics.utilities import rank_zero_warn
 from torchmetrics.utilities.data import dim_zero_cat
 from torchmetrics.utilities.enums import AverageMethod
+from torchmetrics.utilities.imports import _SKLEARN_AVAILABLE
 from torch.special import entr
 import math
-_SKLEARN_AVAILABLE = True
+
 if _SKLEARN_AVAILABLE:
     from sklearn.ensemble import GradientBoostingClassifier
 
@@ -146,8 +147,17 @@ def _compute_informativeness(classifiers: list[GradientBoostingClassifier], feat
         pred_error.append(factor_error)
     return pred_error
 
-def _fit_factor_classifiers(classifiers, data, target):
-    # TODO: insert function documentation
+def _fit_factor_classifiers(classifiers: list[GradientBoostingClassifier], data: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Fit metric classifiers
+
+    Args:
+        classifiers (list[GradientBoostingClassifier]): list of GradientBoostingClassifier that are used for 
+            classification of the factors of variation.
+        data (torch.Tensor): tensor of dimension ``(N, D)`` used by the classifiers to train. ``N`` represents the 
+            number of samples while ``D`` the number of features.
+        target (torch.Tensor): target labels of dimension ``(N, K)`` used to train classifiers with ``K`` the number 
+            of factors of variation.
+    """
 
     num_features = data.shape[1]
     num_factors = target.shape[1]
@@ -158,6 +168,8 @@ def _fit_factor_classifiers(classifiers, data, target):
         relative_importance[:, factor_idx] = classifiers[factor_idx].feature_importances_
         
     relative_importance = torch.from_numpy(relative_importance)
+    
+    return relative_importance
 
 class DisentanglementCompletenessInformativeness(Metric):
     # TODO: insert function documentation
@@ -196,7 +208,15 @@ class DisentanglementCompletenessInformativeness(Metric):
         self.add_state("gathered_targets", default=[], dist_reduce_fx=None)
 
     def update(self, features: torch.Tensor, targets: torch.Tensor) -> None:
-        # TODO: insert function documentation
+        """Update the state with provided features.
+
+        Args:
+            features (torch.Tensor): features computed from the model
+            targets (torch.Tensor): associated targets
+
+        Raises:
+            RuntimeError: if features and targets are not 2-dimensional vectors
+        """
 
         _check_batch_size_dimension(features, targets)
 
@@ -210,8 +230,12 @@ class DisentanglementCompletenessInformativeness(Metric):
         self.gathered_targets.append(targets)
 
     def compute(self):
-        # TODO: insert function documentation
-        
+        """Compute DCI metric
+
+        Returns:
+            dci_metric: dictionary containing the different components of the DCI metric. ``disentanglement``,
+                ``completeness``, ``informativeness_train``, ``informativeness_test``
+        """
         gathered_features = dim_zero_cat(self.gathered_features)
         gathered_features = np.array(gathered_features)
 
@@ -235,5 +259,6 @@ class DisentanglementCompletenessInformativeness(Metric):
             completeness = (completeness * factor_weights).sum()
             train_informativeness = train_informativeness.mean()
             test_informativeness = test_informativeness.mean()
-            
-        return {'disentanglement': disentanglement, 'completeness': completeness, 'informativeness_train': train_informativeness, 'informativeness_test': test_informativeness}
+        
+        dci_metric = {'disentanglement': disentanglement, 'completeness': completeness, 'informativeness_train': train_informativeness, 'informativeness_test': test_informativeness}
+        return dci_metric
