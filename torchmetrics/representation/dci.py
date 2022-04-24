@@ -10,6 +10,7 @@ from torchmetrics.utilities.enums import AverageMethod
 from torchmetrics.utilities.imports import _SKLEARN_AVAILABLE
 from torch.special import entr
 import math
+from random import shuffle
 
 if _SKLEARN_AVAILABLE:
     from sklearn.ensemble import GradientBoostingClassifier
@@ -47,16 +48,17 @@ def _check_classification_target(target: torch.Tensor, num_classes: int) -> None
     if target.min() < 0:
         raise ValueError("The `target` has to be a non-negative tensor.")
 
-    if target.max() > num_classes:
+    if target.max() >= num_classes:
         raise ValueError("The `target` has to be a smaller than num classes.")
 
-def _split_train_test(data: torch.Tensor, target: torch.Tensor, train_percentage: Optional[float] = 0.8) -> Tuple[torch.Tensor]:
+def _split_train_test(data: torch.Tensor, target: torch.Tensor, train_percentage: Optional[float] = 0.8, shuffle: Optional[bool] = True) -> Tuple[torch.Tensor]:
     """Split both data and target into train test subsets.
 
     Args:
         data: tensor with input data
         target: tensor containing the target
         train_percentage: float indicating the percentage of samples used for training
+        shuffle: bool indicating to shuffle the tensor or not, Default True.
 
     Return:
         train_data: tensor with the training subset of ``data``
@@ -64,8 +66,21 @@ def _split_train_test(data: torch.Tensor, target: torch.Tensor, train_percentage
         test_data: tensor with the test subset of ``data``
         test_target: tensor with the test subset of ``target``
     """
+    is_empty = _check_for_empty_tensors(data, target)
+    if is_empty:
+        raise RuntimeError("Cannot split into train and test an empty tensor.")
+
+    _check_batch_size_dimension(data, target)
+    if train_percentage <= 0 or train_percentage >= 1:
+        raise ValueError("Train percentage should be in (0, 1).")
+    
     num_samples = data.shape[0]
     num_samples_train = int( math.ceil(num_samples  * train_percentage))
+    if shuffle:
+        indexes = list(range(num_samples))
+        shuffle(indexes)
+        train_data = train_data[indexes]
+        train_target = train_target[indexes]
 
     train_data = data[:num_samples_train]
     train_target = target[:num_samples_train]
@@ -92,7 +107,10 @@ def _compute_disentanglement(relative_importance: torch.Tensor) -> Tuple[torch.T
     """
     num_factors = relative_importance.shape[1]
     
-    normalized_importance_matrix = relative_importance / relative_importance.sum(dim=1)
+    normalized_importance_matrix = relative_importance / (relative_importance.sum(dim=1) + 1e-11)
+
+    if relative_importance.sum() == 0:
+        return torch.zeros(1), torch.zeros(num_features)
     
     entropy = entr(normalized_importance_matrix)  * math.log(num_factors)
     entropy = entropy.sum(dim=1)
@@ -119,8 +137,11 @@ def _compute_completeness(relative_importance: torch.Tensor) -> torch.Tensor:
         factor_weights: tensor of dimension ``K`` with weights accounting for relative factors
     """
     num_features = relative_importance.shape[0]
-    normalizes_importance_matrix = relative_importance / relative_importance.sum(dim=0)
-
+    normalizes_importance_matrix = relative_importance / (relative_importance.sum(dim=0) + 1e-11)
+    
+    if relative_importance.sum() == 0.:
+        return torch.zeros(1), torch.zeros(self.num_factors)
+        
     entropy = entr(normalizes_importance_matrix) * math.log(num_features)
     entropy = entropy.sum(dim=0)
 
@@ -197,7 +218,7 @@ class DisentanglementCompletenessInformativeness(Metric):
         
         allowed_average = ["macro", "none", None]
         if average not in allowed_average:
-            raise ValueError(f"The `average` has to be one of {allowed_average}, got {average}.")
+            raise ValueError("`average` value is not admissible.")
 
         self.num_factors = len(factor_sizes)
         self.factor_sizes = factor_sizes
@@ -222,7 +243,9 @@ class DisentanglementCompletenessInformativeness(Metric):
 
         if len(features.shape) != 2 or len(targets.shape)!= 2:
             raise RuntimeError("Both features and targets should be 2-dimensional vectors")
-        
+
+        if features.shape[1] != self.num_features:
+            raise RuntimeError(f"Features should be {self.num_features}-dimensional") 
         for factor_idx in range(self.num_factors):
             _check_classification_target(targets, self.factor_sizes[factor_idx])
 
